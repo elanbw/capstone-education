@@ -1,0 +1,62 @@
+---
+title: "HarvardX PH125.9x Capstone Project - Education Data"
+author: "Elan Weingarten"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+```
+
+``` {r load-data, message = FALSE, warning = FALSE}
+data_dir = file.path(".", "data")
+zip_filename = "Education Data.zip"
+zip_path = file.path(data_dir, zip_filename)
+
+ed_data_filename = "ELSI_csv_export_6388498774215174548363.csv"
+ed_data_path = file.path(data_dir, ed_data_filename)
+
+if (!file.exists(ed_data_path)) unzip(zip_path, exdir = data_dir)
+raw_ed_data = read_csv(ed_data_path, skip = 5)
+
+n_rows = format(dim(raw_ed_data)[1], big.mark = ",")
+n_cols = dim(raw_ed_data)[2]
+cat("Raw education data loaded:", n_rows, "rows x", n_cols, "columns.")
+```
+
+```{r clean-data, message = FALSE, warning = FALSE}
+ed_data = raw_ed_data %>%
+  rename( #easier names to work with
+    school_name = `School Name`,
+    state = `State Name [Public School] Latest available year`,
+    full_id = `School ID (12-digit) - NCES Assigned [Public School] Latest available year`,
+    district_id = `Agency ID - NCES Assigned [Public School] Latest available year`
+  ) %>%
+   # Restructure to turn school year from column name into a separate column
+  pivot_longer(
+    cols = -c(school_name, state, full_id, district_id),
+    values_to = "value",
+    names_to = "metric"
+    ) %>%
+  mutate(  #splits at the last space before the school year
+    school_year = str_sub(metric, nchar(metric) - 6),
+    metric = str_sub(metric, 1, nchar(metric) - 8)
+    ) %>%
+  pivot_wider(
+    names_from = metric,
+    values_from = value
+  ) %>%
+  rename(
+    district_name = `Agency Name [Public School]`,
+    school_id = `School ID (7-digit) – NCES Assigned [Public School]`,
+    county_name = `County Name [Public School]`,
+    county_id = `County Number [Public School]`,
+    school_type = `School Type [Public School]`,
+    district_type = `Agency Type [District]`,
+    status_at_start = `Start of Year Status [Public School]`,
+    magnet_flag = `Magnet School [Public School]`
+  )
+
+```
