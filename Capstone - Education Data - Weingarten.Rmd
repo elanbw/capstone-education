@@ -8,55 +8,338 @@ output:
 
 ```{r setup, include=FALSE}
 library(tidyverse)
+library(knitr)
+library(ggplot2)
+library(scales)
 ```
 
-``` {r load-data, message = FALSE, warning = FALSE}
+```{r load-data, message = FALSE, warning = FALSE}
 data_dir = file.path(".", "data")
-zip_filename = "Education Data.zip"
-zip_path = file.path(data_dir, zip_filename)
 
-ed_data_filename = "ELSI_csv_export_6388498774215174548363.csv"
-ed_data_path = file.path(data_dir, ed_data_filename)
+#data is split into four datasets since ElSi can only ouput 75 columns at a time
+get_elsi_data = function (filename) {
+  zip_filename = paste0(filename, ".zip")
+  zip_path = file.path(data_dir, zip_filename)
+  
+  ed_data_filename = paste0(filename, ".csv")
+  ed_data_path = file.path(data_dir, ed_data_filename)
+  
+  if (!file.exists(ed_data_path)) unzip(zip_path, exdir = data_dir)
+  read_csv(ed_data_path, skip = 5)
+}
 
-if (!file.exists(ed_data_path)) unzip(zip_path, exdir = data_dir)
-raw_ed_data = read_csv(ed_data_path, skip = 5)
 
-n_rows = format(dim(raw_ed_data)[1], big.mark = ",")
-n_cols = dim(raw_ed_data)[2]
-cat("Raw education data loaded:", n_rows, "rows x", n_cols, "columns.")
+
+filenames = c("1 ElSi School Info",
+              "2 ElSi Characteristics",
+              "3 ElSi Race",
+              "4 ElSi Teacher and Race")
+
+raw_data = lapply(filenames, get_elsi_data)
+
+kable(
+  sapply(raw_data, dim) %>% 
+    `rownames<-`(c("Rows", "Columns")) %>% 
+    `colnames<-`(filenames),
+  caption = "Raw education data loaded with the following dimensions"
+)
 ```
 
 ```{r clean-data, message = FALSE, warning = FALSE}
-ed_data = raw_ed_data %>%
-  rename( #easier names to work with
-    school_name = `School Name`,
-    state = `State Name [Public School] Latest available year`,
-    full_id = `School ID (12-digit) - NCES Assigned [Public School] Latest available year`,
-    district_id = `Agency ID - NCES Assigned [Public School] Latest available year`
-  ) %>%
-   # Restructure to turn school year from column name into a separate column
-  pivot_longer(
-    cols = -c(school_name, state, full_id, district_id),
-    values_to = "value",
-    names_to = "metric"
+make_clean_data = function (raw_data) {
+  raw_data %>%
+    rename( #easier names to work with
+      school_name = `School Name`,
+      state = `State Name [Public School] Latest available year`,
+      full_id = `School ID (12-digit) - NCES Assigned [Public School] Latest available year`
     ) %>%
-  mutate(  #splits at the last space before the school year
-    school_year = str_sub(metric, nchar(metric) - 6),
-    metric = str_sub(metric, 1, nchar(metric) - 8)
-    ) %>%
-  pivot_wider(
-    names_from = metric,
-    values_from = value
+     # Restructure to turn school year from column name into a separate column
+    pivot_longer(
+      cols = -c(school_name, state, full_id) & !contains("Latest available year"),
+      values_to = "value",
+      names_to = "metric"
+      ) %>%
+    mutate(  #splits at the last space before the school year
+      year = as.numeric(paste0("20", str_sub(metric, nchar(metric) - 1))),
+      metric = str_sub(metric, 1, nchar(metric) - 8)
+      ) %>%
+    pivot_wider(
+      names_from = metric,
+      values_from = value
+    )
+}
+
+clean_data = lapply(raw_data, make_clean_data)
+
+#combine all four datasets into one big one
+combined = clean_data[[1]] %>%
+  left_join(select(clean_data[[2]], -c(school_name, state)), by = c("full_id", "year")) %>%
+  left_join(select(clean_data[[3]], -c(school_name, state)), by = c("full_id", "year")) %>%
+  left_join(select(clean_data[[4]], -c(school_name, state)), by = c("full_id", "year")) %>%
+  rename_with(~ .x %>% #clean up column names
+    str_remove_all("\\s\\[(District|Public School)\\]|\\.| Latest available year| [-–—] NCES Assigned") %>%  # remove [District] or [Public School]
+    str_trim() %>%                                         # remove leading/trailing spaces
+    str_replace_all("[ /\\-–]", "_") %>%                      # replace space, /, -, or – with _
+    str_to_lower() %>%                                         # make all lower case
+    str_replace_all("agency", "district") %>%              # replace agency with district
+    str_replace_all("\\(sy_2017_18_onward\\)", "2018_onward") %>% #replace note about sy so that all parentheticals can be removed
+    str_remove_all("_\\([^\\)]*\\)")                         # remove all parentheticals
   ) %>%
-  rename(
-    district_name = `Agency Name [Public School]`,
-    school_id = `School ID (7-digit) – NCES Assigned [Public School]`,
-    county_name = `County Name [Public School]`,
-    county_id = `County Number [Public School]`,
-    school_type = `School Type [Public School]`,
-    district_type = `Agency Type [District]`,
-    status_at_start = `Start of Year Status [Public School]`,
-    magnet_flag = `Magnet School [Public School]`
+  mutate( #merge school level (since changed after 2018)
+    school_level = str_replace(str_replace(str_replace(
+      str_replace(school_level, "1-Primary", "Elementary"),
+      "2-Middle", "Middle"),
+      "3-High", "High"),
+      "4-Other", "Other")
+  ) %>%
+  mutate(
+    school_level = if_else(is.na(school_level), school_level_2018_onward, school_level)
+    ) %>%
+  select(-school_level_2018_onward) %>%
+  # Replace missing data with NA
+  mutate(across(everything(), ~ ifelse(. %in% c("†", "–", "‡"), NA, .))) %>%
+  filter( # remove all rows where there is no meaningful data
+  !if_all(
+    -c(school_name, state, full_id, district_id, year),
+    ~ is.na(.)
+    )
+  ) %>%
+  # guess type of data
+  type.convert(as.is = TRUE) 
+
+# Make tidy by converting flags to boolean, and spreading columns with multiple
+# possible values into individual columns with 1/-1 values.
+
+flag_to_boolean = function(column) {
+  case_when(
+    column == "1-Yes" ~ TRUE,
+    column == "2-No" ~ FALSE,
+    TRUE ~ NA
+  )
+}
+
+tidy_data = combined %>%
+  mutate(
+    # convert flags into boolean columns
+    magnet_school = flag_to_boolean(magnet_school),
+    charter_school = flag_to_boolean(charter_school),
+    reconstituted_school = flag_to_boolean(reconstituted_flag),
+    title_i = case_when(
+      grepl("6-Not", title_i_school_status) ~ FALSE,
+      is.na(title_i_school_status) ~ NA,
+      TRUE ~ TRUE
+    ),
+    #recode options to simple terms
+    #only keep the categories we plan to investigate
+    school_type = case_when(
+      grepl("Regular", school_type) ~ "school_type_regular",
+      grepl("Special", school_type) ~ "school_type_sped",
+      TRUE ~ NA
+    ),
+    district_type = case_when( 
+      grepl("local", district_type, ignore.case = TRUE) ~ "district_type_regular",
+      grepl("agency", district_type) ~ "district_type_gov_run",
+      grepl("Charter", district_type) ~ "district_type_charter",
+      TRUE ~ NA
+    ),
+    status = case_when(
+      grepl("Open", start_of_year_status) ~ "status_open",
+      grepl("New", start_of_year_status) ~ "status_new",
+      grepl("Changed", start_of_year_status) ~ "status_moved",
+      grepl("Reopened", start_of_year_status) ~ "status_reopened",
+      TRUE ~ NA
+    ),
+    school_level = case_when(
+      school_level == "Elementary" ~ "school_level_es",
+      school_level == "High" ~ "school_level_hs",
+      school_level == "Middle" ~ "school_level_ms",
+      school_level == "Secondary" ~ "school_level_ms|school_level_hs",
+      TRUE ~ NA
+    )
+  ) %>%
+  select(-c(reconstituted_flag, start_of_year_status, title_i_school_status, school_id))
+  
+# Create a widened version for each column and reduce into a single data frame
+wide_data = tidy_data %>%
+  separate_rows(school_level, sep = "\\|") %>%
+  
+  # Create school_type columns
+  filter(!is.na(school_type)) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = school_type, values_from = value, values_fill = -1) %>%
+  
+  # Create district_type columns
+  filter(!is.na(district_type)) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = district_type, values_from = value, values_fill = -1) %>%
+  
+  # Create status columns
+  filter(!is.na(status)) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = status, values_from = value, values_fill = -1) %>%
+  
+  # Create school_level columns
+  filter(!is.na(school_level)) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = school_level, values_from = value, values_fill = -1) %>%
+  
+  #turn demographics into percentages
+  mutate(
+    race_aian = american_indian_alaska_native_students/total_race_ethnicity,
+    race_aapi = asian_or_asian_pacific_islander_students/total_race_ethnicity,
+    race_hispanic = hispanic_students/total_race_ethnicity,
+    race_black = black_or_african_american_students/total_race_ethnicity,
+    race_white = white_students/total_race_ethnicity,
+    race_nhpi = nat_hawaiian_or_other_pacific_isl_students/total_race_ethnicity,
+    race_multi = two_or_more_races_students/total_race_ethnicity
+  ) %>%
+  select(-c(american_indian_alaska_native_students, 
+            asian_or_asian_pacific_islander_students,
+            hispanic_students,
+            black_or_african_american_students,
+            white_students,
+            nat_hawaiian_or_other_pacific_isl_students,
+            two_or_more_races_students,
+            total_race_ethnicity
+            )) %>%
+  
+  #turn genders into percentages
+  mutate(
+    total_gender = male_students + female_students,
+    gender_male = male_students/total_gender,
+    gender_female = female_students/total_gender
+  ) %>%
+  select(-c(total_gender, male_students, female_students))
+      
+        
+kable(
+  as.data.frame(t(dim(wide_data))) %>%
+    `colnames<-`(c("Rows", "Columns")),
+  caption = "Clean data is created with the following dimensions"
+)
+```
+
+## Description of all variables used
+
+```{r describe-clean-data, echo = FALSE}
+  
+# Describe each variable
+column_info <- tribble(
+  ~Column, ~Type, ~Description,
+  "school_name", "character", "Name of the school",
+  "state", "character", "U.S. state where the school is located",
+  "full_id", "character", "Full NCES-assigned 12-digit school ID",
+  "district_id", "character", "NCES-assigned district identifier",
+  "year", "character", "Simplified school year (e.g., 2024 for the 2023–24 school year)",
+  "district_name", "character", "Name of the school district",
+  "county_name", "character", "County where the school is located",
+  "county_number", "character", "County FIPS or internal number",
+  "magnet_school", "logical", "TRUE if school is a magnet school, FALSE if not, NA if unknown",
+  "charter_school", "logical", "TRUE if school is a charter school, FALSE if not, NA if unknown",
+  "total_students_all_grades", "numeric", "Total student enrollment across all grades",
+  "full_time_equivalent_teachers", "numeric", "FTE count of teachers",
+  "pupil_teacher_ratio", "numeric", "Ratio of students to teachers",
+  "reconstituted_school", "logical", "TRUE if school was reconstituted, FALSE if not, NA if unknown",
+  "title_i", "logical", "TRUE if school has any Title I program, FALSE if explicitly excluded, NA if unknown",
+  "school_type_regular", "integer", "1 if the school is regular type, -1 otherwise",
+  "school_type_sped", "integer", "1 if the school is special education, -1 otherwise",
+  "district_type_regular", "integer", "1 if district is regular local, -1 otherwise",
+  "district_type_charter", "integer", "1 if district is independent charter, -1 otherwise",
+  "district_type_gov_run", "integer", "1 if district is a government-run agency, -1 otherwise",
+  "status_open", "integer", "1 if the school is open at start of year, -1 otherwise",
+  "status_new", "integer", "1 if the school is newly opened, -1 otherwise",
+  "status_moved", "integer", "1 if the school changed boundary/agency, -1 otherwise",
+  "status_reopened", "integer", "1 if the school was reopened, -1 otherwise",
+  "school_level_ms", "integer", "1 if the school serves middle school level, -1 otherwise",
+  "school_level_es", "integer", "1 if the school serves elementary school level, -1 otherwise",
+  "school_level_hs", "integer", "1 if the school serves high school level, -1 otherwise",
+  "race_aian", "numeric", "Share of students identifying as American Indian/Alaska Native",
+  "race_aapi", "numeric", "Share of students identifying as Asian or Pacific Islander",
+  "race_hispanic", "numeric", "Share of students identifying as Hispanic",
+  "race_black", "numeric", "Share of students identifying as Black or African American",
+  "race_white", "numeric", "Share of students identifying as White",
+  "race_nhpi", "numeric", "Share of students identifying as Native Hawaiian/Pacific Islander",
+  "race_multi", "numeric", "Share of students identifying as two or more races",
+  "gender_male", "numeric", "Share of students identifying as male",
+  "gender_female", "numeric", "Share of students identifying as female"
+)
+
+
+for (i in seq_len(nrow(column_info))) {
+  cat(
+    paste0(
+      "Column:      ", column_info$Column[i], " [", column_info$Type[i], "]", "\n",
+      "Description: ", column_info$Description[i], "\n",
+      "-------------------------------------------\n"
+    )
+  )
+}
+```
+## Investigate the data
+
+The number of schools with data in each school year over the 10 years of the dataset are relatively steady at around 86-thousand schools in roughly 16-thousand districts per year.
+```{r investigate-data, echo = FALSE, warning = FALSE}
+#schools by year
+schools_by_year = wide_data %>%
+  group_by(year) %>%
+  summarize(n = n())
+
+schools_by_year %>%
+  ggplot(aes(x = year, y = n)) +
+  geom_col(fill = "#2c7fb8") +  # clean blue tone
+  geom_text(
+    aes(label = comma(n)), 
+    vjust = -0.3, 
+    color = "black",
+    size = 3.5
+  ) +
+  scale_x_continuous(breaks = pretty(schools_by_year$year, n = 10)) +
+  scale_y_continuous(label = comma) +
+  labs(
+    title = "Number of Schools in Dataset by Year",
+    x = "Year",
+    y = "Number of Schools"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+n_districts_avg = wide_data %>%
+  select(district_id, year) %>%
+  distinct() %>%
+  group_by(year) %>%
+  summarize(n = n()) %>%
+  pull(n) %>%
+  mean()
+
+# Calculate geometric mean (exclude zeros and NAs)
+enrollment_geo_mean = exp(mean(log(wide_data$total_students_all_grades[wide_data$total_students_all_grades > 0]), na.rm = TRUE))
+
+# Plot with geometric mean
+wide_data %>%
+  ggplot(aes(x = total_students_all_grades)) +
+  geom_histogram(fill = "#2c7fb8", bins = 30) +
+  geom_vline(xintercept = enrollment_geo_mean, color = "black", linetype = "dashed", size = 1) +
+  geom_text(
+    aes(x = enrollment_geo_mean, y = 150000, label = paste0("Geo. Mean: ", comma(round(enrollment_geo_mean)))),
+    vjust = -0.5,
+    hjust = 0,
+    color = "black",
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  scale_x_log10(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Student Enrollment Across all Schools",
+    x = "Student Enrollment (log scale)",
+    y = "Number of Schools"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank()
   )
 
 ```
