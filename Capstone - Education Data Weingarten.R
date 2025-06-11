@@ -17,11 +17,8 @@
 #   5. Attempt to make predictions using the mixed-effects models
 #   6. Explain the trends
 
-library(boot)
 library(broom.mixed)
 library(caret)
-library(ggeffects)
-library(ggplot2)
 library(knitr)
 library(kableExtra)
 library(lme4)
@@ -490,7 +487,7 @@ lm_white_summary = get_lm_summary(lm_white, "white")
 # Combine into one table
 summarize_models = function (black_summary, white_summary, hispanic_summary)
   reduce(
-    list(lm_black_summary, lm_white_summary, lm_hispanic_summary),
+    list(black_summary, white_summary, hispanic_summary),
     full_join,
     by = "term"
     ) %>%
@@ -563,7 +560,7 @@ suppressWarnings( #warns about a missing text file
 #
 #   All trends with Mixed Effect model are very statistically significant given
 # the high t-statistic value
-# NOTE: |t| > 2 ~ significant on the 5% level ()
+# NOTE: |t| > 2 ~ significant on the 5% level
 
 ###################################################################
 ## 5. Attempt to make predictions using the mixed-effects models ##
@@ -622,4 +619,4 @@ save(lm_summary, lmer_summary, ed_data_full, ed_data, race_trends,
      schools_by_year_plot, enrollment_plot, race_trends_plot, race3_trend_plot,
      white_density_plot, hispanic_density_plot, black_density_plot,
      n_schools_avg, n_districts_avg,
-     file = file.path("data", "r variables.RData"))
+     file = file.path("data", "r_variables.RData"))
