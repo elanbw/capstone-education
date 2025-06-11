@@ -595,7 +595,7 @@ rmse_black = RMSE(ed_test$pred_black, ed_test$race_black)
 rmse_white = RMSE(ed_test$pred_white, ed_test$race_white)
 rmse_hispanic = RMSE(ed_test$pred_hispanic, ed_test$race_hispanic)
 
-# 5. Print results
+# Print results
 tibble(
   Race = c("Black", "White", "Hispanic"),
   RMSE = c(rmse_black, rmse_white, rmse_hispanic)
