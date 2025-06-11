@@ -6,17 +6,58 @@ output:
   pdf_document
 ---
 
-```{r setup, include=FALSE}
+# I. Introduction
+
+Topic: Are Title I schools more likely to see increases in % White students and decreases in % Black or Hispanic students?
+
+This study investigates the relationship between Title I status and longitudinal shifts in racial composition at the school level. We find that Title I schools are disproportionately likely to experience decreases in the percentage of Black and Hispanic students and increases in White enrollment. Using regression and machine learning methods, we predict demographic change at the school level and explore patterns at state and district scales to inform equity-driven education policy.
+
+Background:
+Title I Funding is ... used a metric for...
+Race is used because ...
+
+#II. Methods
+
+We gathered data from the **National Center for Education Statistics (NCES)** using their **Elementary and Secondary Information System (ELSi)** web application to create and download custom tables of education statistics.
+
+We collected data on enrollment, race, etc. 
+Each data point, or row, represents a single school in a single school year.
+
+To make this data analyzable, we split all markers (such as race, Title I funding, etc.) into separate columns with a value of 1 or -1 to signify whether it applies to that school in that particular school year. Race and gender were transformed into percentages of the total student enrollment.
+
+Each school year is simplified into a single year, for example the 2023-24 school year is represented as 2024. This concise style of writing the year is used for numeric calculations, and reduces the size of text in visual representations. Thus, it is used throughout this report.
+
+We removed the following from our dataset:
+
+* **School with less than 50 students**: EXPLAIN
+* **The *Magnet School Flag* column**: Fewer than 25% of data points had a null value (not 1 or -1, but NA), so it was removed
+* etc. [IMPLEMENT THIS!]
+* etc.
+
+We found the resulting clean to contain
+X rows and column
+represetnt x schools and x districts across all states and DC
+Among all data points, ## of them have demographic data for students and for title i funding
+
+With this data was bisualized and employed LM to.....
+
+The following process was used to process the data:
+
+```{r setup, message = FALSE, warning = FALSE}
 library(tidyverse)
 library(knitr)
 library(ggplot2)
 library(scales)
+library(lme4)
+library(broom.mixed)
+library(kableExtra)
+library(ggeffects)
 ```
 
-```{r load-data, message = FALSE, warning = FALSE}
+```{r methods-load-data, message = FALSE, warning = FALSE}
 data_dir = file.path(".", "data")
 
-#data is split into four datasets since ElSi can only ouput 75 columns at a time
+#data is split into four datasets since ELSi can only output 75 columns at a time
 get_elsi_data = function (filename) {
   zip_filename = paste0(filename, ".zip")
   zip_path = file.path(data_dir, zip_filename)
@@ -45,7 +86,7 @@ kable(
 )
 ```
 
-```{r clean-data, message = FALSE, warning = FALSE}
+```{r methods-clean-data, message = FALSE, warning = FALSE}
 make_clean_data = function (raw_data) {
   raw_data %>%
     rename( #easier names to work with
@@ -160,7 +201,7 @@ tidy_data = combined %>%
   select(-c(reconstituted_flag, start_of_year_status, title_i_school_status, school_id))
   
 # Create a widened version for each column and reduce into a single data frame
-wide_data = tidy_data %>%
+ed_data_full = tidy_data %>%
   separate_rows(school_level, sep = "\\|") %>%
   
   # Create school_type columns
@@ -209,11 +250,12 @@ wide_data = tidy_data %>%
     gender_male = male_students/total_gender,
     gender_female = female_students/total_gender
   ) %>%
-  select(-c(total_gender, male_students, female_students))
+  select(-c(total_gender, male_students, female_students)) %>%
+  filter(total_students_all_grades > 50)
       
         
 kable(
-  as.data.frame(t(dim(wide_data))) %>%
+  as.data.frame(t(dim(ed_data_full))) %>%
     `colnames<-`(c("Rows", "Columns")),
   caption = "Clean data is created with the following dimensions"
 )
@@ -221,10 +263,10 @@ kable(
 
 ## Description of all variables used
 
-```{r describe-clean-data, echo = FALSE}
+```{r methods-describe-dataset, echo = FALSE}
   
 # Describe each variable
-column_info <- tribble(
+column_info = tribble(
   ~Column, ~Type, ~Description,
   "school_name", "character", "Name of the school",
   "state", "character", "U.S. state where the school is located",
@@ -275,12 +317,14 @@ for (i in seq_len(nrow(column_info))) {
   )
 }
 ```
+
 ## Investigate the data
 
 The number of schools with data in each school year over the 10 years of the dataset are relatively steady at around 86-thousand schools in roughly 16-thousand districts per year.
-```{r investigate-data, echo = FALSE, warning = FALSE}
+
+```{r methods-investigate-data, echo = FALSE, warning = FALSE}
 #schools by year
-schools_by_year = wide_data %>%
+schools_by_year = ed_data_full %>%
   group_by(year) %>%
   summarize(n = n())
 
@@ -306,7 +350,7 @@ schools_by_year %>%
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
 
-n_districts_avg = wide_data %>%
+n_districts_avg = ed_data_full %>%
   select(district_id, year) %>%
   distinct() %>%
   group_by(year) %>%
@@ -315,10 +359,10 @@ n_districts_avg = wide_data %>%
   mean()
 
 # Calculate geometric mean (exclude zeros and NAs)
-enrollment_geo_mean = exp(mean(log(wide_data$total_students_all_grades[wide_data$total_students_all_grades > 0]), na.rm = TRUE))
+enrollment_geo_mean = exp(mean(log(ed_data_full$total_students_all_grades[ed_data_full$total_students_all_grades > 0]), na.rm = TRUE))
 
 # Plot with geometric mean
-wide_data %>%
+ed_data_full %>%
   ggplot(aes(x = total_students_all_grades)) +
   geom_histogram(fill = "#2c7fb8", bins = 30) +
   geom_vline(xintercept = enrollment_geo_mean, color = "black", linetype = "dashed", size = 1) +
@@ -342,4 +386,296 @@ wide_data %>%
     panel.grid.minor = element_blank()
   )
 
+# Racial trends over time
+ed_data_full %>%
+  group_by(year) %>%
+  summarize(across(starts_with("race_"), ~mean(.x, na.rm = TRUE))) %>%
+  pivot_longer(-year, names_to = "race", values_to = "share") %>%
+  ggplot(aes(x = year, y = share, color = race)) +
+  geom_line(size = 1.2) +
+  labs(title = "Average Racial Composition of Schools Over Time",
+       x = "Year", y = "Average Share", color = "Race") +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()
+
+#Explore missing data
+library(naniar)
+gg_miss_var(ed_data_full, show_pct = TRUE)
+cat("Magnet School data is spotty, and is thus dropped.")
 ```
+
+# III. Results
+We begin by investigating trends in the top three races across schools and Title I funding, and slimmed down the dataset to focus on those parameters by...
+This left us with.... of data, and removed all schools after 2022 since they are missing title I data
+and added a scaled year with the midpoints being
+
+The proportion of both Black and Hispanic students declined more often in Title I schools than non Title I schools, while the trend was reversed for White students.
+
+To measure the trend, we first defined the change in % of race as...
+
+We defined the title_i status of a school during the change period as ...
+
+```{r results-prelim-visualization, warning = FALSE}
+#Slim full dataset to just Title I and top 3 races
+ed_data = ed_data_full %>%
+  select(school_name, state, full_id, district_id, year, district_name, 
+         county_name, county_number, total_students_all_grades, title_i, 
+         race_hispanic, race_black, race_white) %>%
+  mutate(
+    title_i = case_when(
+      is.na(title_i) ~ NA,
+      title_i ~ 1,
+      !title_i ~ 0
+      ),
+    year_scaled = year - 2015
+    ) %>%
+  filter(!is.na(title_i), !is.na(race_hispanic), !is.na(race_black), !is.na(race_white)) %>%
+  #remove schools with only 1 year of data
+  group_by(full_id) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+#Racial Trends of top three races in public schools
+ed_data %>%
+  group_by(year) %>%
+  summarize(across(starts_with("race_"), ~mean(.x, na.rm = TRUE))) %>%
+  pivot_longer(-year, names_to = "race", values_to = "share") %>%
+  ggplot(aes(x = year, y = share, color = race)) +
+  geom_line(size = 1.2) +
+  labs(title = "Average Racial Composition of Schools Over Time",
+       x = "Year", y = "Average Share", color = "Race") +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()
+
+#Create race trend set for preliminary visualization
+race_trends = ed_data %>%
+  group_by(full_id) %>%
+  summarize(
+    first_year = min(year),
+    last_year = max(year),
+    race_black_change = race_black[year == last_year] - race_black[year == first_year],
+    race_hispanic_change = race_hispanic[year == last_year] - race_hispanic[year == first_year],
+    race_white_change = race_white[year == last_year] - race_white[year == first_year],
+    avg_enrollment = mean(total_students_all_grades),
+    title_i_mode = as.numeric(names(which.max(table(title_i))))
+  ) %>%
+  filter(last_year > 2020, first_year < 2016) %>%
+  select(race_black_change, race_hispanic_change, race_white_change, title_i_mode, avg_enrollment)
+
+#Title I schools appear to be more likely to have lost black students proportionally in the last 10 years
+race_trends %>%
+  ggplot(aes(x = race_black_change, fill = title_i_mode == 1)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("FALSE" = "#e41a1c", "TRUE" = "#377eb8")) +
+  scale_x_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = .2 * c(-1, 1)
+    ) +
+  labs(
+    title = "Distribution of Black Student Share Change",
+    subtitle = "Comparing Title I vs. Non–Title I Schools",
+    x = "Change in % Black Students",
+    y = "Density",
+    fill = "Title I"
+  ) +
+  theme_minimal(base_size = 12)
+
+#Title I schools appear to be more likely to have lost hispanic students proportionally in the last 10 years
+race_trends %>%
+  ggplot(aes(x = race_hispanic_change, fill = title_i_mode == 1)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("FALSE" = "#e41a1c", "TRUE" = "#377eb8")) +
+  scale_x_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = .2 * c(-1, 1)
+    ) +
+  labs(
+    title = "Distribution of Hispanic Student Share Change",
+    subtitle = "Comparing Title I vs. Non–Title I Schools",
+    x = "Change in % Hispanic Students",
+    y = "Density",
+    fill = "Title I"
+  ) +
+  theme_minimal(base_size = 12)
+
+#Title I schools appear to be more likely to have lost hispanic students proportionally in the last 10 years
+race_trends %>%
+  ggplot(aes(x = race_white_change, fill = title_i_mode == 1)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("FALSE" = "#e41a1c", "TRUE" = "#377eb8")) +
+  scale_x_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = .3 * c(-1, 1)
+    ) +
+  labs(
+    title = "Distribution of White Student Share Change",
+    subtitle = "Comparing Title I vs. Non–Title I Schools",
+    x = "Change in % White Students",
+    y = "Density",
+    fill = "Title I"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+Upon investigating the trends between Title I funding and race demographics, we found a statistically significant correlation between title_i status of a school and 
+
+```{r results-models}
+# Investigate with Linear Regression
+lm_black = lm(race_black_change ~ title_i_mode + avg_enrollment, data = race_trends)
+lm_hispanic = lm(race_hispanic_change ~ title_i_mode + avg_enrollment, data = race_trends)
+lm_white = lm(race_white_change ~ title_i_mode + avg_enrollment, data = race_trends)
+
+summary(lm_black)
+summary(lm_hispanic)
+summary(lm_white)
+
+#Investigate with Liner Mixed-Effects Model
+# Is the portion of black students changing faster in Title I schools changing faster over time?
+lmer_black_state = lmer(race_black ~ title_i * year_scaled + (1 | full_id) + (1 | state), data = ed_data)
+lmer_hispanic_state = lmer(race_hispanic ~ title_i * year_scaled + (1 | full_id) + (1 | state), data = ed_data)
+lmer_white_state = lmer(race_white ~ title_i * year_scaled + (1 | full_id) + (1 | state), data = ed_data)
+
+
+# Could not converge for black or white.
+# Try without state as fix effect, since school_id already accounts for location
+lmer_black = lmer(race_black ~ title_i * year_scaled + (1 | full_id), data = ed_data)
+lmer_hispanic = lmer(race_hispanic ~ title_i * year_scaled + (1 | full_id), data = ed_data)
+lmer_white = lmer(race_white ~ title_i * year_scaled + (1 | full_id), data = ed_data)
+
+
+get_lmer_summary = function (model, race) {
+  tidy(model, effects = "fixed") %>%
+    select(term, estimate, std.error, statistic) %>%
+    rename_with(~ paste0(race, "_", .), -term)
+}
+
+black_summary <- get_lmer_summary(lmer_black, "black")
+white_summary <- get_lmer_summary(lmer_white, "white")
+hispanic_summary <- get_lmer_summary(lmer_hispanic, "hispanic")
+
+# Combine into one table
+combined_summary <- reduce(
+  list(black_summary, white_summary, hispanic_summary),
+  full_join,
+  by = "term"
+  ) %>%
+  mutate(
+    black = sprintf("%.5f (%.5f) [%.2f]", black_estimate, black_std.error, black_statistic),
+    white = sprintf("%.5f (%.5f) [%.2f]", white_estimate, white_std.error, white_statistic),
+    hispanic = sprintf("%.5f (%.5f) [%.2f]", hispanic_estimate, hispanic_std.error, hispanic_statistic)
+    ) %>%
+  select(term, black, white, hispanic)
+
+# Trends show that while title i schools are losing black and Hispanic students 
+# and gaining white students, Non-Title I schools are diversifying
+# NOTE: |t| > 2 ~ significant on the 5% level ()
+suppressWarnings(
+  combined_summary %>%
+  kable(
+    caption = "Fixed Effects Estimates (Standard Error) [t-values]",
+    col.names = c("Predictor", "% Black", "% White", "% Hispanic")
+  ) %>%
+  kable_styling(full_width = FALSE)
+)
+
+```
+
+## Predicting
+The `lmer` model proved too memory-intensive to reliably generate predictions. As a fallback, we used a simpler linear regression model (`lm`) to estimate trends.
+
+These generated predictions did not align well with the actual observed values.
+
+```{r results-predict}
+library(lme4)
+library(tidyverse)
+library(boot)
+
+# Prediction grid: observed years, Title I only
+years_observed <- sort(unique(ed_data$year_scaled))
+pred_grid <- expand.grid(
+  year_scaled = years_observed,
+  title_i = 1
+)
+
+# Add year column for later
+pred_grid$year <- pred_grid$year_scaled + 2015
+
+# Function to predict fixed effects
+predict_fixed <- function(model, newdata) {
+  predict(model, newdata = newdata, re.form = NA)
+}
+
+# Wrapper to return matrix of predictions for bootstrapping
+bootstrap_preds <- function(fit, newdata) {
+  function(.) predict(fit, newdata = newdata, re.form = NA)
+}
+
+# Helper to bootstrap and extract mean + CI
+get_bootstrap_ci <- function(model, pred_data) {
+  boot_out <- bootMer(model, bootstrap_preds(model, pred_data),
+                      nsim = 200, use.u = FALSE, re.form = NA, parallel = "no")
+  
+  preds <- predict(model, newdata = pred_data, re.form = NA)
+  ci <- apply(boot_out$t, 2, quantile, probs = c(0.025, 0.975))
+
+  tibble(
+    predicted = preds,
+    conf.low = ci[1, ],
+    conf.high = ci[2, ]
+  )
+}
+
+# Get predictions for each model
+ci_black <- get_bootstrap_ci(lmer_black, pred_grid) %>%
+  mutate(race = "Black")
+ci_white <- get_bootstrap_ci(lmer_white, pred_grid) %>%
+  mutate(race = "White")
+ci_hispanic <- get_bootstrap_ci(lmer_hispanic, pred_grid) %>%
+  mutate(race = "Hispanic")
+
+# Combine results
+pred_all <- bind_rows(ci_black, ci_white, ci_hispanic) %>%
+  bind_cols(pred_grid[rep(1:nrow(pred_grid), times = 3), c("year", "year_scaled")])
+
+# Prepare actual data summaries for Title I schools
+actual_data <- ed_data %>%
+  filter(title_i == 1) %>%
+  group_by(year_scaled) %>%
+  summarize(
+    year = unique(year_scaled + 2015),
+    Black = mean(race_black, na.rm = TRUE),
+    White = mean(race_white, na.rm = TRUE),
+    Hispanic = mean(race_hispanic, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c("Black", "White", "Hispanic"), names_to = "race", values_to = "actual")
+
+# Join actual values to predictions for plotting
+plot_data <- pred_all %>%
+  left_join(actual_data, by = c("year", "race"))
+
+# Final plot
+ggplot(plot_data, aes(x = year)) +
+  geom_line(aes(y = predicted, color = race), size = 1.2) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = race), alpha = 0.2, color = NA) +
+  geom_point(aes(y = actual, color = race), size = 2, shape = 21, stroke = 0.5, fill = "white") +
+  labs(
+    title = "Predicted vs Actual Racial Composition in Title I Schools",
+    y = "% of Students",
+    x = "Year"
+  ) +
+  scale_y_continuous(labels = percent_format(scale = 100)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+
+
+```
+
+# IV. Conclusion
+
+The unreliable prediction results from the linear regression model suggests that while the overall trends may be statistically significant, the linear model lacks the complexity to capture meaningful patterns at the prediction level. More sophisticated approaches — or a richer dataset — may be required to generate reliable forecasts.
+
+Despite those shortcomings, we discovered a surprising trend. Though small, there is indeed a statistically significant trend that **Title I** schools are **losing Black and Hispanic** shares over time more quickly (or gaining them more slowly) than **non–Title I** schools. Conversely, **White** student share is **decreasing** less rapidly in **Title I** schools than in **non–Title I** schools.
+
+There is a clear trend across schools that as the American population grows more diverse, the portion of white students in schools decreases. The nuance of these results is that 
